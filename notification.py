@@ -1128,29 +1128,84 @@ class NotificationService:
             logger.error(f"企业微信请求失败: {response.status_code}")
             return False
     
-    def send_to_feishu(self, content: str) -> bool:
-        """
-        推送消息到飞书机器人
+    def _send_feishu_message(self, content: str) -> bool:
+        """发送单条飞书消息 (已修改为交互式卡片以支持Markdown)"""
         
-        飞书自定义机器人 Webhook 消息格式：
-        {
-            "msg_type": "text",
-            "content": {
-                "text": "文本内容"
+        # 尝试从内容第一行提取标题，如果没有则使用默认标题
+        title = "A股自选股日报"
+        lines = content.strip().split('\n')
+        if lines:
+            # 去掉Markdown的 # 号，取第一行作为标题
+            first_line = lines[0].replace('#', '').strip()
+            if first_line:
+                title = first_line[:50] # 标题不能太长
+
+        # 构造交互式卡片消息
+        payload = {
+            "msg_type": "interactive",
+            "card": {
+                "config": {
+                    "wide_screen_mode": True
+                },
+                "header": {
+                    "template": "blue", # 标题颜色: blue, red, green, yellow, purple 等
+                    "title": {
+                        "content": title,
+                        "tag": "plain_text"
+                    }
+                },
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {
+                            # 这里是关键：tag 为 lark_md 才能渲染 Markdown
+                            "content": content, 
+                            "tag": "lark_md"
+                        }
+                    },
+                    {
+                        "tag": "hr" # 分隔线
+                    },
+                    {
+                        "tag": "note",
+                        "elements": [
+                            {
+                                "content": f"来自: Stock Analysis AI | 生成时间: {datetime.now().strftime('%H:%M:%S')}",
+                                "tag": "plain_text"
+                            }
+                        ]
+                    }
+                ]
             }
         }
         
-        注意：飞书文本消息限制约 20KB，超长内容会自动分批发送
-        可通过环境变量 FEISHU_MAX_BYTES 调整限制值
+        logger.debug(f"飞书请求 URL: {self._feishu_url}")
         
-        Args:
-            content: 消息内容（Markdown 会转为纯文本）
+        try:
+            response = requests.post(
+                self._feishu_url,
+                json=payload,
+                timeout=30
+            )
             
-        Returns:
-            是否发送成功
-        """
-        if not self._feishu_url:
-            logger.warning("飞书 Webhook 未配置，跳过推送")
+            logger.debug(f"飞书响应状态码: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                code = result.get('code') if 'code' in result else result.get('StatusCode')
+                if code == 0:
+                    logger.info("飞书卡片消息发送成功")
+                    return True
+                else:
+                    error_msg = result.get('msg') or result.get('StatusMessage', '未知错误')
+                    logger.error(f"飞书返回错误: {error_msg}")
+                    return False
+            else:
+                logger.error(f"飞书请求失败: HTTP {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"发送飞书消息异常: {e}")
             return False
         
         max_bytes = self._feishu_max_bytes  # 从配置读取，默认 20000 字节
